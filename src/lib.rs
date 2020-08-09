@@ -99,6 +99,10 @@ impl Chip8 {
     }
 
     pub fn display_buffer_size(&self) -> usize {
+        // The display buffer js should use is only half the size of the real display buffer.
+        // The bottom half of the display buffer is what should be shown on screen,
+        // the top half is what the game state is actually like. We use two representations to
+        // reduce the flicking on the screen by ORing the previous frame with the current frame
         DISPLAY_BUFFER_SIZE / 2
     }
 
@@ -112,6 +116,8 @@ impl Chip8 {
     }
 
     pub fn release_key(&mut self, key: JsValue) -> Result<(), JsValue> {
+        // this and the press_key function could be one function with 2 modes of operation,
+        // but this feels like a better API.
         let idx = match key.as_f64() {
             Some(idx) => idx.round() as usize,
             None => return Err(Error::new("Could not parse key as f64").into()),
@@ -187,7 +193,7 @@ impl Chip8 {
             (0xF, _, 3, 3) => self.store_BCD(vx),
             (0xF, x, 5, 5) => self.bulk_store(x),
             (0xF, x, 6, 5) => self.bulk_load(x),
-            _ => unimplemented!("Unknown instruction encountered!"),
+            _ => Err(Error::new("Unimplemented instruction encountered!").into()),
         }
     }
 
