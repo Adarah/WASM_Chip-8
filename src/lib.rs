@@ -1,5 +1,6 @@
 #![feature(slice_fill)]
 
+#![allow(non_snake_case)]
 pub mod games;
 mod utils;
 
@@ -103,8 +104,8 @@ impl Chip8 {
     }
 
     pub fn display_buffer_ptr(&self) -> *const u8 {
-        log!("{:?}", &self.memory[STACK_START..NEW_FRAME_START]);
-        self.memory[NEW_FRAME_START..].as_ptr()
+        // log!("{:?}", &self.memory[STACK_START..NEW_FRAME_START]);
+        self.memory[STACK_START..NEW_FRAME_START].as_ptr()
     }
 
     pub fn display_buffer_size(&self) -> usize {
@@ -144,15 +145,13 @@ impl Chip8 {
                 for (mem, bytes) in self.memory.iter_mut().skip(0x200).zip(game.code) {
                     *mem = *bytes;
                 }
-                self.sp = STACK_START;
-                self.pc = 0x200;
                 self.game = game;
                 Ok(())
             }
         }
     }
 
-    pub fn tick(&mut self) -> Result<(), JsValue> {
+    pub fn tick(&mut self) {
         let machine_code = self.fetch();
         self.decode_and_execute(machine_code)
     }
@@ -168,7 +167,7 @@ impl Chip8 {
         machine_code
     }
 
-    fn decode_and_execute(&mut self, instruction_code: u16) -> Result<(), JsValue> {
+    fn decode_and_execute(&mut self, instruction_code: u16) {
         log!("instruction_code: {:04X?}", instruction_code);
         let nibbles = (
             (instruction_code >> 12 & 0x000F),
@@ -210,146 +209,123 @@ impl Chip8 {
             (0xF, _, 0, 0xA) => self.block_until_key_is_pressed(vx),
             (0xF, _, 1, 5) => self.set_delay_timer(vx),
             (0xF, _, 1, 8) => self.set_sound_timer(vx),
-            (0xF, _, 1, 0xE) => self.increment_I(vx),
+            (0xF, _, 1, 0xE) => self.increment_i(vx),
             (0xF, _, 2, 9) => self.load_font_location_in_I(vx),
-            (0xF, _, 3, 3) => self.store_BCD(vx),
+            (0xF, _, 3, 3) => self.store_bcd(vx),
             (0xF, x, 5, 5) => self.bulk_store(x),
             (0xF, x, 6, 5) => self.bulk_load(x),
-            _ => Err(Error::new("Unimplemented instruction encountered!").into()),
+            (0xF, _, 7, 5) => self.nop(),
+            (0xF, _, 8, 5) => self.nop(),
+            _ => panic!("Unknowin instruction encountered!"),
+            // _ => Err(Error::new("Unimplemented instruction encountered!").into()),
         }
     }
 
-    fn set_sp(&mut self, offset: isize) -> Result<(), JsValue> {
+    fn set_sp(&mut self, offset: isize) {
+        log!("stack pointer: {}", self.sp);
+        log!("offset: {}", offset);
         self.sp = (self.sp as isize + offset) as usize;
         log!("set stack pointer to: {}", self.sp);
-        if !(STACK_START - 12 * 2 < self.sp && self.sp < STACK_START) {
-            return Err(Error::new("StackOverflow: Stack exceeded maximum size").into());
-        }
-        Ok(())
+        // if STACK_START - 12 * 2 >= self.sp {
+        //     return Err(Error::new("StackOverflow: Stack exceeded maximum size").into());
+        // }
+        // if self.sp >= STACK_START {
+        //     return Err(Error::new("StackUnderflow: Stack is invading frame buffer").into());
+        // }
     }
 
-    fn set_pc(&mut self, address: usize) -> Result<(), JsValue> {
-        self.pc = address;
-        log!("set program counter to: {:04X}", self.pc);
-        if self.pc % 2 != 0 {
-            return Err(Error::new("AlignementError: Unaligned memory access attempted!").into());
-        }
-        Ok(())
-    }
-
-    fn clear_display(&mut self) -> Result<(), JsValue> {
+    fn clear_display(&mut self) {
         log!("Clearing display");
         let (old_frame, current_frame) = self.memory.split_at_mut(NEW_FRAME_START);
-        old_frame[STACK_START..NEW_FRAME_START].copy_from_slice(current_frame);
         current_frame.fill(0);
-        Ok(())
+        old_frame[STACK_START..NEW_FRAME_START].copy_from_slice(current_frame);
     }
 
-    fn return_from_subroutine(&mut self) -> Result<(), JsValue> {
-        self.pc = (self.memory[self.sp] as usize) << 8 | self.memory[self.sp + 1] as usize;
-        log!("Returning from subroutine: {:04X}", self.sp);
-        self.set_sp(2)?;
-        Ok(())
+    fn return_from_subroutine(&mut self) {
+        self.pc = ((self.memory[self.sp] as usize) << 8) | (self.memory[self.sp + 1] as usize);
+        log!("Returning from subroutine to: {}", self.pc);
+        self.set_sp(2);
     }
 
-    fn jump(&mut self, address: usize) -> Result<(), JsValue> {
-        log!("Jumping to: {:04X}", address);
-        self.set_pc(address)
+    fn jump(&mut self, address: usize) {
+        // log!("Jumping to: {:04X}", address);
+        self.pc = address;
     }
 
-    fn call_subroutine(&mut self, address: usize) -> Result<(), JsValue> {
+    fn call_subroutine(&mut self, address: usize) {
         log!("Calling subroutine: {:04X}", address);
-        self.set_sp(-2)?;
-        self.memory[self.sp] = (address & 0xFF00) as u8;
-        self.memory[self.sp + 1] = (address & 0x00FF) as u8;
-        Ok(())
+        self.set_sp(-2);
+        self.memory[self.sp] = ((self.pc & 0xFF00) >> 8) as u8;
+        self.memory[self.sp + 1] = (self.pc & 0x00FF) as u8;
+        self.pc = address;
     }
 
-    fn skip_next_if_equal_to_byte(&mut self, vx: u8, byte: u8) -> Result<(), JsValue> {
+    fn skip_next_if_equal_to_byte(&mut self, vx: u8, byte: u8) {
         log!("Skip next if vx == byte: ({}, {})", vx, byte);
         if vx == byte {
             self.pc += 2;
         }
-        Ok(())
     }
 
-    fn skip_next_if_not_equal_to_byte(&mut self, vx: u8, byte: u8) -> Result<(), JsValue> {
+    fn skip_next_if_not_equal_to_byte(&mut self, vx: u8, byte: u8) {
         log!("Skip next if vx != byte: ({}, {})", vx, byte);
         if vx != byte {
             self.pc += 2;
         }
-        Ok(())
     }
 
-    fn skip_next_if_equal_to_register(&mut self, vx: u8, vy: u8) -> Result<(), JsValue> {
+    fn skip_next_if_equal_to_register(&mut self, vx: u8, vy: u8) {
         log!("Skip next if vx == vy: ({}, {})", vx, vy);
         if vx == vy {
             self.pc += 2;
         }
-        Ok(())
     }
 
-    fn load_from_byte(&mut self, x: usize, byte: u8) -> Result<(), JsValue> {
+    fn load_from_byte(&mut self, x: usize, byte: u8) {
         log!("Loading V{:X} with {}", x, byte);
         self.registers.Vx[x] = byte;
-        Ok(())
     }
 
-    fn add_byte(&mut self, x: usize, byte: u8) -> Result<(), JsValue> {
+    fn add_byte(&mut self, x: usize, byte: u8) {
         log!("Adding V{:X} with {}", x, byte);
         self.registers.Vx[x] = self.registers.Vx[x].wrapping_add(byte);
-        Ok(())
     }
 
-    fn load_from_register(&mut self, x: usize, vy: u8) -> Result<(), JsValue> {
+    fn load_from_register(&mut self, x: usize, vy: u8) {
         log!("Load V{:X} with {}", x, vy);
         self.registers.Vx[x] = vy;
-        Ok(())
     }
 
-    fn or(&mut self, x: usize, vy: u8) -> Result<(), JsValue> {
+    fn or(&mut self, x: usize, vy: u8) {
         log!("ORing V{:X} with {}", x, vy);
         self.registers.Vx[x] |= vy;
-        Ok(())
     }
 
-    fn and(&mut self, x: usize, vy: u8) -> Result<(), JsValue> {
+    fn and(&mut self, x: usize, vy: u8) {
         log!("ANDing V{:X} with {}", x, vy);
         self.registers.Vx[x] &= vy;
-        Ok(())
     }
 
-    fn xor(&mut self, x: usize, vy: u8) -> Result<(), JsValue> {
+    fn xor(&mut self, x: usize, vy: u8) {
         log!("XORing V{:X} with {}", x, vy);
         self.registers.Vx[x] ^= vy;
-        Ok(())
     }
 
-    fn add_registers(&mut self, x: usize, vy: u8) -> Result<(), JsValue> {
+    fn add_registers(&mut self, x: usize, vy: u8) {
         log!("Adding V{:X} with {}", x, vy);
-
-        self.registers.Vx[0xF] = 0;
-
-        self.registers.Vx[x] = self.registers.Vx[x].checked_add(vy).unwrap_or_else(|| {
-            self.registers.Vx[0xF] = 1;
-            self.registers.Vx[x].wrapping_add(vy)
-        });
-        Ok(())
+        let (result, overflow) = self.registers.Vx[x].overflowing_add(vy);
+        self.registers.Vx[0xF] = if overflow {1} else {0};
+        self.registers.Vx[x] = result;
     }
 
-    fn sub_vy_from_vx(&mut self, x: usize, vy: u8) -> Result<(), JsValue> {
-        log!("Subbingg {} from V{:X}", vy, x);
-        if self.registers.Vx[x] >= vy {
-            self.registers.Vx[0xF] = 1;
-        } else {
-            self.registers.Vx[0xF] = 0;
-        }
-
-        self.registers.Vx[x] = self.registers.Vx[x].wrapping_sub(vy);
-        Ok(())
+    fn sub_vy_from_vx(&mut self, x: usize, vy: u8) {
+        log!("Subtracting {} from V{:X}", vy, x);
+        let (result, overflow) = self.registers.Vx[x].overflowing_sub(vy);
+        self.registers.Vx[0xF] = if overflow { 1 } else { 0 };
+        self.registers.Vx[x] = result;
     }
 
-    fn shift_right(&mut self, x: usize, y: usize) -> Result<(), JsValue> {
+    fn shift_right(&mut self, x: usize, y: usize) {
         log!("Right shifting V{:X}", x);
         if self.game.shift_quirk {
             self.registers.Vx[0xF] = self.registers.Vx[x] & 1;
@@ -358,27 +334,17 @@ impl Chip8 {
             self.registers.Vx[0xF] = self.registers.Vx[y] & 1;
             self.registers.Vx[x] = self.registers.Vx[y] >> 1;
         }
-        Ok(())
     }
 
-    fn sub_vx_from_vy(&mut self, x: usize, vy: u8) -> Result<(), JsValue> {
+    fn sub_vx_from_vy(&mut self, x: usize, vy: u8) {
         log!("Subbing V{:X} from {}", x, vy);
-        if vy >= self.registers.Vx[x] {
-            self.registers.Vx[0xF] = 1;
-        } else {
-            self.registers.Vx[0xF] = 0;
-        }
-
-        self.registers.Vx[x] = vy.wrapping_sub(self.registers.Vx[x]);
-        Ok(())
+        let (result, overflow) = vy.overflowing_sub(self.registers.Vx[x]);
+        self.registers.Vx[0xF] = if overflow { 1 } else { 0 };
+        self.registers.Vx[x] = result;
     }
 
-    fn shift_left(&mut self, x: usize, y: usize) -> Result<(), JsValue> {
+    fn shift_left(&mut self, x: usize, y: usize) {
         log!("Left shifting V{:X}", x);
-        // log!("before");
-        // log!("VF: {}", self.registers.Vx[0xF]);
-        // log!("V{:X}: {}", x, self.registers.Vx[x]);
-
         if self.game.shift_quirk {
             self.registers.Vx[0xF] = (self.registers.Vx[x] & 0b10000000) >> 7;
             self.registers.Vx[x] = self.registers.Vx[x] << 1;
@@ -386,124 +352,126 @@ impl Chip8 {
             self.registers.Vx[0xF] = (self.registers.Vx[y] & 0b10000000) >> 7;
             self.registers.Vx[x] = self.registers.Vx[y] << 1;
         }
-        // log!("after");
-        // log!("VF: {}", self.registers.Vx[0xF]);
-        // log!("V{:X}: {}", x, self.registers.Vx[x]);
-        Ok(())
     }
 
-    fn skip_next_if_not_equal_to_register(&mut self, vx: u8, vy: u8) -> Result<(), JsValue> {
-        log!("Skip next if vx != vy ({}, {})", vx, vy);
+    fn skip_next_if_not_equal_to_register(&mut self, vx: u8, vy: u8) {
+        // log!("Skip next if vx != vy ({}, {})", vx, vy);
         if vx != vy {
             self.pc += 2;
         }
-        Ok(())
     }
 
-    fn set_I(&mut self, address: usize) -> Result<(), JsValue> {
+    fn set_I(&mut self, address: usize) {
         self.registers.I = address;
         log!("Setting I: {:04X}", self.registers.I);
-        Ok(())
     }
 
-    fn jump_relative(&mut self, address: usize) -> Result<(), JsValue> {
-        self.set_pc(address + self.registers.Vx[0] as usize)?;
+    fn jump_relative(&mut self, address: usize) {
+        self.pc = address + (self.registers.Vx[0] as usize);
         log!("Jumping relative to: {:04X}", self.pc);
-        Ok(())
     }
 
-    fn set_random_number(&mut self, x: usize, byte: u8) -> Result<(), JsValue> {
+    fn set_random_number(&mut self, x: usize, byte: u8) {
         let mut rng = thread_rng();
         let random_num: u8 = rng.gen();
+        log!("chose random num: {}", random_num);
         self.registers.Vx[x] = random_num & byte;
         log!("Setting random number: {:02X}", self.registers.Vx[x]);
-        Ok(())
     }
 
-    fn draw(&mut self, vx: u8, vy: u8, n: u8) -> Result<(), JsValue> {
-        log!("Draw");
+    fn draw(&mut self, vx: u8, vy: u8, n: u8) {
+        log!("Draw args: vx = {}, vy = {}, n = {}", vx, vy, n);
         let (rest, current_frame) = self.memory.split_at_mut(NEW_FRAME_START);
         let (rest, smoothed_frame) = rest.split_at_mut(STACK_START);
         smoothed_frame.copy_from_slice(current_frame);
         self.registers.Vx[0xF] = 0;
 
         let sprite = &rest[self.registers.I..(self.registers.I + n as usize)];
-        for x in 0..n {
-            let sprite_byte = sprite[x as usize];
-            for y in 0..8 {
-                let row = ((vy + x) % 32) as usize;
-                let col = ((vx + y) % 64) as usize;
-                let byte = (row * 64 + col) / 8;
-                let mask = 0b10000000 >> (y % 8);
+        // log!("sprite: {:?}", sprite);
+        for y in 0..n {
+            let sprite_byte = sprite[y as usize];
+            for x in 0..8 {
+                let row = ((vx + x) % 64) as usize;
+                let col = ((vy + y) % 32) as usize;
+                let byte = (col * 64 + row) / 8;
+                // log!("sprite_byte: {:08b}", sprite_byte);
+                // log!("screen_byte: {:08b}", current_frame[byte]);
+                let screen_mask: u8 = 0b1000_0000 >> (col * 64 + row) % 8;
+                let sprite_bit = sprite_byte & (0b1000_0000 >> x);
+                // log!("screen mask: {:08b}", screen_mask);
 
-                if (sprite_byte & mask != 0) && (current_frame[byte] & mask != 0) {
-                    self.registers.Vx[0xF] = 1;
+                // log!("sprite bit: {:08b}", sprite_bit);
+
+                // log!("current_frame_byte: {:08b}", current_frame[byte]);
+                if sprite_bit != 0 {
+                    if current_frame[byte] & screen_mask != 0 {
+                        self.registers.Vx[0xF] = 1;
+                    }
+                    current_frame[byte] ^= screen_mask
                 }
-                current_frame[byte] ^= sprite_byte & mask;
+
+                // current_frame[byte] ^=
+                //     (current_frame[byte] & screen_mask) & sprite_byte & (0b1000_0000 >> x);
+                // log!("result: {:08b}", current_frame[byte]);
             }
         }
 
         for (smooth, raw) in smoothed_frame.iter_mut().zip(current_frame.iter()) {
             *smooth |= raw;
         }
-        Ok(())
     }
 
-    fn skip_if_key_is_pressed(&mut self, vx: u8) -> Result<(), JsValue> {
+    fn skip_if_key_is_pressed(&mut self, vx: u8) {
         log!("Skip next if key is pressed: {:X}", vx);
         if self.keypad[vx as usize] {
             self.pc += 2;
         }
-        Ok(())
     }
 
-    fn skip_if_key_is_not_pressed(&mut self, vx: u8) -> Result<(), JsValue> {
+    fn skip_if_key_is_not_pressed(&mut self, vx: u8) {
         log!("Skip next if key is not pressed: {:X}", vx);
         if !self.keypad[vx as usize] {
             self.pc += 2;
         }
-        Ok(())
     }
 
-    fn load_from_delay_timer(&mut self, x: usize) -> Result<(), JsValue> {
-        log!("Loading with delay timer: {}", self.registers.delay);
+    fn load_from_delay_timer(&mut self, x: usize) {
+        log!(
+            "Loading V{:X} with delay timer: {}",
+            x,
+            self.registers.delay
+        );
         self.registers.Vx[x] = self.registers.delay;
-        Ok(())
     }
 
-    fn block_until_key_is_pressed(&mut self, vx: u8) -> Result<(), JsValue> {
-        log!("Block until key is pressed: {}", self.registers.delay);
+    fn block_until_key_is_pressed(&mut self, vx: u8) {
+        log!("Block until key is pressed: {}", vx);
         if !self.keypad[vx as usize] {
             self.pc -= 2;
         }
-        Ok(())
     }
 
-    fn set_delay_timer(&mut self, vx: u8) -> Result<(), JsValue> {
+    fn set_delay_timer(&mut self, vx: u8) {
         log!("Set delay timer: {}", vx);
         self.registers.delay = vx;
-        Ok(())
     }
 
-    fn set_sound_timer(&mut self, vx: u8) -> Result<(), JsValue> {
+    fn set_sound_timer(&mut self, vx: u8) {
         log!("Set sound timer: {}", vx);
         self.registers.sound = vx;
-        Ok(())
     }
 
-    fn increment_I(&mut self, vx: u8) -> Result<(), JsValue> {
+    fn increment_i(&mut self, vx: u8) {
         log!("Increment I: {}", vx);
         self.registers.I += vx as usize;
-        Ok(())
     }
 
-    fn load_font_location_in_I(&mut self, vx: u8) -> Result<(), JsValue> {
+    fn load_font_location_in_I(&mut self, vx: u8) {
         self.registers.I = FONT_LOCATION + (vx as usize) * 5;
         log!("Set I to font location of {}: {}", vx, self.registers.I);
-        Ok(())
     }
 
-    fn store_BCD(&mut self, vx: u8) -> Result<(), JsValue> {
+    fn store_bcd(&mut self, vx: u8) {
         log!("Store BCD: {}", vx);
         let hundreds = vx / 100;
         let tens = (vx % 100) / 10;
@@ -511,20 +479,18 @@ impl Chip8 {
         self.memory[self.registers.I] = hundreds;
         self.memory[self.registers.I + 1] = tens;
         self.memory[self.registers.I + 2] = ones;
-        Ok(())
     }
 
-    fn bulk_store(&mut self, x: usize) -> Result<(), JsValue> {
+    fn bulk_store(&mut self, x: usize) {
         log!("Bulk store from V0 to V{:X}", x);
         self.memory[self.registers.I..self.registers.I + x + 1]
             .copy_from_slice(&self.registers.Vx[0..x + 1]);
         if !self.game.load_store_quirk {
             self.registers.I = self.registers.I + x + 1;
         }
-        Ok(())
     }
 
-    fn bulk_load(&mut self, x: usize) -> Result<(), JsValue> {
+    fn bulk_load(&mut self, x: usize) {
         log!("Bulk load into V0 to V{:X}", x);
         self.registers.Vx[0..x + 1]
             .copy_from_slice(&self.memory[self.registers.I..self.registers.I + x + 1]);
@@ -536,26 +502,125 @@ impl Chip8 {
         if !self.game.load_store_quirk {
             self.registers.I = self.registers.I + x + 1;
         }
-        Ok(())
+    }
+
+    fn nop(&mut self) {
+        self.pc += 54;
     }
 }
 
-#[cfg(test)]
+#[cfg(wasm_bindgen_test)]
 mod tests {
     use super::*;
 
-    #[test]
+}
+
+mod idk {
+
+    #![cfg(target_arch = "wasm32")]
+
+    use wasm_bindgen_test;
+    use wasm_bindgen::prelude::JsValue;
+    use wasm_bindgen_test::*;
+    use super::*;
+    use super::games::*;
+
+    wasm_bindgen_test_configure!(run_in_browser);
+
+    #[wasm_bindgen_test]
+    fn loads_games() {
+        let mut chip8 = Chip8::new();
+        chip8.load_rom(JsValue::from_str("TETRIS")).unwrap();
+        let slice = unsafe { std::slice::from_raw_parts(chip8.memory_ptr(), 4096) };
+        assert_eq!(&slice[0x200..(0x200 + TETRIS.len())], TETRIS);
+
+        chip8.load_rom(JsValue::from_str("brix")).unwrap();
+        let slice = unsafe { std::slice::from_raw_parts(chip8.memory_ptr(), 4096) };
+        assert_eq!(&slice[0x200..(0x200 + BRIX.len())], BRIX);
+    }
+
+    #[wasm_bindgen_test]
     fn add_register_overflows_and_sets_flag() {
         let mut chip8 = Chip8::new();
         chip8.load_from_byte(0, 0xF0);
-        chip8.load_from_byte(1, 0x0F);
-        chip8.add_registers(0, 1);
+        chip8.add_registers(0, 0x0F);
         assert_eq!(chip8.registers.Vx[0], 0xFF);
         assert_eq!(chip8.registers.Vx[0xF], 0);
 
-        chip8.add_registers(0, 1);
+        chip8.add_registers(0, 0x0F);
 
         assert_eq!(chip8.registers.Vx[0], 0x0E);
         assert_eq!(chip8.registers.Vx[0xF], 1);
     }
+
+    #[wasm_bindgen_test]
+    fn draws_correctly() {
+        let mut chip8 = Chip8::new();
+        chip8.load_rom(JsValue::from_str("bctest"));
+        chip8.set_I(000);
+        let e: [u8; 5] = [0xF0, 0x80, 0xF0, 0x80, 0xF0]; // E
+        chip8.memory[0..5].copy_from_slice(&e);
+        chip8.draw(0, 0, 5);
+        // log!("{:X?}", &chip8.memory[NEW_FRAME_START..]);
+        for i in 0..5 {
+            assert_eq!(chip8.memory[NEW_FRAME_START + 8 *i], e[i]);
+        }
+        assert_eq!(chip8.registers.Vx[0xF], 0);
+
+        chip8.draw(0, 0, 5);
+        for i in 0..5 {
+            assert_eq!(chip8.memory[NEW_FRAME_START + 8 * i], 0);
+        }
+        assert_eq!(chip8.registers.Vx[0xF], 1);
+    }
+    #[wasm_bindgen_test]
+    fn return_reverts_call() {
+        let mut chip8 = Chip8::new();
+        chip8.memory[0x200] = 0x24;
+        chip8.memory[0x201] = 0x00;
+        chip8.tick();
+        chip8.memory[0x400] = 0x00;
+        chip8.memory[0x401] = 0xEE;
+        chip8.tick();
+        assert_eq!(chip8.pc, 0x202);
+        assert_eq!(chip8.sp, STACK_START);
+    }
+
+    #[wasm_bindgen_test]
+    fn check_sub_vy_from_vx() {
+        let mut chip8 = Chip8::new();
+        chip8.registers.Vx[0] = 2;
+        chip8.registers.Vx[1] = 1;
+        chip8.memory[0x200] = 0x80;
+        chip8.memory[0x201] = 0x15;
+        chip8.tick();
+        assert_eq!(chip8.registers.Vx[0], 1);
+        assert_eq!(chip8.registers.Vx[0xF], 0);
+        chip8.pc = 0x200;
+        chip8.tick();
+        assert_eq!(chip8.registers.Vx[0], 0);
+        assert_eq!(chip8.registers.Vx[0xF], 0);
+        chip8.pc = 0x200;
+        chip8.tick();
+        assert_eq!(chip8.registers.Vx[0], 0xFF);
+        assert_eq!(chip8.registers.Vx[0xF], 1);
+    }
+
+    #[wasm_bindgen_test]
+    fn check_sub_vx_from_vy() {
+        let mut chip8 = Chip8::new();
+        chip8.registers.Vx[0] = 1;
+        chip8.registers.Vx[1] = 2;
+        chip8.memory[0x200] = 0x80;
+        chip8.memory[0x201] = 0x17;
+        chip8.tick();
+        assert_eq!(chip8.registers.Vx[0], 1);
+        assert_eq!(chip8.registers.Vx[0xF], 0);
+        chip8.registers.Vx[0] = 3;
+        chip8.pc = 0x200;
+        chip8.tick();
+        assert_eq!(chip8.registers.Vx[0], 0xFF);
+        assert_eq!(chip8.registers.Vx[0xF], 1);
+    }
+
 }
